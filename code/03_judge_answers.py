@@ -27,7 +27,9 @@ DIRECT_PROMPT = (
 
 RUBRIC_PROMPT = (
     "Grade the answer on three dimensions, each 1 to 5. Reply with only three "
-    "numbers in this format: groundedness=X, correctness=Y, completeness=Z\n"
+    "numbers in this exact format and nothing else — no explanations, no extra words: "
+    "groundedness=X, correctness=Y, completeness=Z\n"
+    "Always write a number 1-5 for each dimension; never write X or leave one blank.\n"
     "- groundedness: every claim in the answer is supported by the passages\n"
     "- correctness: the answer matches the correct answer\n"
     "- completeness: the answer covers everything the question asks\n\n"
@@ -36,10 +38,14 @@ RUBRIC_PROMPT = (
 
 
 def build_passages(context):
+    # pilot_sample.json stores context as a dict {"title": [...], "sentences": [[...]]};
+    # accept that, and also a list of [title, [sentences]] pairs.
+    if isinstance(context, dict):
+        context = zip(context["title"], context["sentences"])
     parts = []
     for title, sentences in context:
         parts.append(f"[{title}] " + " ".join(sentences))
-    return "\n".join(parts)
+    return chr(10).join(parts)
 
 
 def main():

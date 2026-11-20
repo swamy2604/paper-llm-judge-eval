@@ -30,6 +30,13 @@ def parse_scores(raw, mode):
         m = re.search(rf"{dim}\s*=\s*([1-5])", raw, re.I)
         if m:
             out[dim] = int(m.group(1))
+    if not out:
+        # Fallback: some judges reply with three bare numbers in order
+        # ("5 5 4" or "1, 2, 3") instead of the labeled format.
+        nums = re.findall(r"\b([1-5])\b", raw)
+        if len(nums) == 3:
+            out = dict(zip(("groundedness", "correctness", "completeness"),
+                           map(int, nums)))
     return out
 
 

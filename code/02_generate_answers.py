@@ -23,11 +23,14 @@ PROMPT = (
 
 
 def build_passages(context):
-    # context is a list of [title, [sentences]] pairs
+    # pilot_sample.json stores context as a dict {"title": [...], "sentences": [[...]]};
+    # accept that, and also a list of [title, [sentences]] pairs.
+    if isinstance(context, dict):
+        context = zip(context["title"], context["sentences"])
     parts = []
     for title, sentences in context:
         parts.append(f"[{title}] " + " ".join(sentences))
-    return "\n".join(parts)
+    return chr(10).join(parts)
 
 
 def main():
