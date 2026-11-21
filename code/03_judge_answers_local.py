@@ -15,11 +15,22 @@ Same prompts and output format as 03_judge_answers.py, so results are
 directly comparable with the API version.
 
 Resumable: judgements already in --out (same id + judge + mode) are skipped
-and new ones are appended. Run one judge at a time with --judge so a long
-full-scale run can be split across Colab sessions.
+and new ones are appended. Each judgement is written to --out immediately
+(flushed per row), so a crash loses at most the one judgement being made.
+Run one judge at a time with --judge so a long full-scale run can be split
+across Colab sessions.
+
+Memory: same T4 limit as generation — passages are capped at
+MAX_PASSAGE_CHARS, and an out-of-memory error retries once with a shorter
+context before that judgement is recorded as skipped (raw_judgement="",
+judgement_error="oom"). Answers that failed generation (generation_error
+set) are skipped entirely.
 """
 import json
 import os
+
+MAX_PASSAGE_CHARS = 8000
+RETRY_PASSAGE_CHARS = 3000
 
 JUDGES = [
     "Qwen/Qwen2.5-3B-Instruct",    # small judge
@@ -45,7 +56,7 @@ RUBRIC_PROMPT = (
 )
 
 
-def build_passages(context):
+def build_passages(context, max_chars=MAX_PASSAGE_CHARS):
     # pilot_sample.json stores context as a dict {"title": [...], "sentences": [[...]]};
     # accept that, and also a list of [title, [sentences]] pairs.
     if isinstance(context, dict):
@@ -53,7 +64,7 @@ def build_passages(context):
     parts = []
     for title, sentences in context:
         parts.append(f"[{title}] " + " ".join(sentences))
-    return chr(10).join(parts)
+    return chr(10).join(parts)[:max_chars]
 
 
 def grade(model, tok, prompt):
@@ -61,11 +72,15 @@ def grade(model, tok, prompt):
     messages = [{"role": "user", "content": prompt}]
     text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tok(text, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        gen = model.generate(**inputs, max_new_tokens=60, do_sample=False)
+    try:
+        with torch.no_grad():
+            gen = model.generate(**inputs, max_new_tokens=60, do_sample=False)
+    except torch.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        return "", "oom"
     return tok.decode(
         gen[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-    ).strip()
+    ).strip(), None
 
 
 def main():
@@ -92,7 +107,9 @@ def main():
             done = {(json.loads(l)["id"], json.loads(l)["judge"], json.loads(l)["mode"])
                     for l in f if l.strip()}
         print(f"resuming: {len(done)} judgements already in {args.out}")
-    out = []
+    out = open(args.out, "a")
+    n_new = 0
+    n_skipped = 0
     for judge in judges:
         tok = AutoTokenizer.from_pretrained(judge)
         model = AutoModelForCausalLM.from_pretrained(
@@ -102,6 +119,8 @@ def main():
             torch_dtype=torch.bfloat16,
         )
         for ans in answers:
+            if ans.get("generation_error"):
+                continue
             item = sample[ans["id"]]
             passages = build_passages(item["context"])
             for mode, template in (("direct", DIRECT_PROMPT), ("rubric", RUBRIC_PROMPT)):
@@ -110,20 +129,31 @@ def main():
                 prompt = template.format(
                     passages=passages, question=ans["question"], answer=ans["model_answer"]
                 )
-                out.append({
+                raw, error = grade(model, tok, prompt)
+                if error == "oom":
+                    prompt = template.format(
+                        passages=build_passages(item["context"], RETRY_PASSAGE_CHARS),
+                        question=ans["question"], answer=ans["model_answer"])
+                    raw, error = grade(model, tok, prompt)
+                row = {
                     "id": ans["id"],
                     "judge": judge,
                     "mode": mode,
-                    "raw_judgement": grade(model, tok, prompt),
-                })
-        print(f"judge done: {judge} ({len(out)} new judgements this run)", flush=True)
+                    "raw_judgement": raw,
+                }
+                if error:
+                    row["judgement_error"] = error
+                    n_skipped += 1
+                out.write(json.dumps(row) + "\n")
+                out.flush()
+                n_new += 1
+                torch.cuda.empty_cache()
+        print(f"judge done: {judge} ({n_new} new judgements this run, {n_skipped} skipped)", flush=True)
         del model, tok
         gc.collect()
         torch.cuda.empty_cache()
-    with open(args.out, "a") as f:
-        for row in out:
-            f.write(json.dumps(row) + "\n")
-    print("saved", len(out), "new judgements to", args.out)
+    out.close()
+    print("saved", n_new, "new judgements to", args.out)
 
 
 if __name__ == "__main__":
